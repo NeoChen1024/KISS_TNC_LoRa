@@ -1,5 +1,5 @@
 /* ========================================================================== *\
-||			KISS TNC for UART LoRa as Packet Radio		      ||
+||		KISS TNC for UART LoRa module as Packet Radio Modem	      ||
 ||                                 Neo_Chen                                   ||
 \* ========================================================================== */
 
