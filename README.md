@@ -7,5 +7,8 @@ By violating the specification of the KISS protocol (ignoring all non-data frame
 
 I am aware that LoRa is not a reliable media, and lost LoRa might cause APRS packet being truncated, but it seems to work fine. (as long as one APRS packet fits in one LoRa packet)
 
+# On Air Format
+Same as AX.25, but 16 bit checksum is omitted.
+
 ## Credits
 BX4ACP for giving me advises

@@ -40,15 +40,16 @@ enum kiss_state
 };
 
 /* Special characters */
-#define _FEND	0xC0
-#define _FESC	0xDB
-#define _TFEND	0xDC
-#define _TFESC	0xDD
+#define _FEND	((byte)0xC0)
+#define _FESC	((byte)0xDB)
+#define _TFEND	((byte)0xDC)
+#define _TFESC	((byte)0xDD)
+#define _AX25_FLAG	((byte)0x7E)
 
 /* KISS frame type */
 enum kiss_frame_type
 {
-	_FRAME,
+	_FRAME = 0,
 	_TXDELAY,
 	_P,
 	_SLOTTIME,
@@ -62,13 +63,14 @@ enum kiss_frame_type
 
 /* SoftwareSerial for connecting UART LoRa transceiver */
 SoftwareSerial XCVR(XCVR_RX, XCVR_TX);
+#define COM Serial
 
 void setup(void)
 {
-	Serial.begin(9600);
+	COM.begin(9600);
 	XCVR.begin(9600);
 
-	pinMode(2, INPUT);
+	pinMode(AUX, INPUT_PULLUP);
 	pinMode(LED_BUILTIN, OUTPUT);
 }
 
@@ -86,6 +88,7 @@ enum wait_type
 	WAIT_AUX
 };
 
+/* Waiting for data or operation completion */
 void wait(int type)
 {
 	switch(type)
@@ -99,7 +102,7 @@ void wait(int type)
 				spin();
 			break;
 		case WAIT_COM:
-			while(Serial.available() <= 0)
+			while(COM.available() <= 0)
 				spin();
 			break;
 		default:
@@ -110,78 +113,112 @@ void wait(int type)
 void loop()
 {
 	uint8_t c;
-	uint8_t state = _END;
+	uint8_t tx_state = _END;
+	uint8_t rx_state = _END;
 	char debug_buf[256];
 
-	while(1)
-	{
-		while((Serial.available() <= 0 && XCVR.available() <= 0))
-			spin();
-		
-		/* Computer -> Modem -> RF */
-		if(Serial.available() > 0)
-		{
-			c = Serial.read();
+while(1)
+{
+	while((Serial.available() <= 0 && XCVR.available() <= 0))
+		spin();
 
-			if(state != _START)
+	/* Computer -> Modem -> RF */
+	if(COM.available() > 0)
+	{
+		c = COM.read();
+
+		if(tx_state != _START)
+		{
+			switch(c)
 			{
-				switch(c)
+				case _FEND:
+					if(tx_state == _END)
+					{
+						tx_state = _START;
+					}
+					else
+					{
+						tx_state = _END;
+					}
+					break;
+				case _FESC:
+					if(tx_state == _DATA)
+					{
+						tx_state = _ESCAPE;
+					}
+					break;
+				case _TFEND:
+				case _TFESC:
+					if(tx_state == _ESCAPE)
+						tx_state = _DATA;
+					break;
+				default:
+					tx_state = _END;
+					break;
+			}
+		}
+		else
+		{
+			if(c == OP(0x0, _FRAME))	/* First port, data frame */
+			{
+				XCVR.write(_AX25_FLAG);
+				while(c != _FEND)
 				{
-					case _FEND:
-						if(state == _END)
-						{
-							state = _START;
-						}
-						else
-						{
-							state = _END;
-						}
+					wait(WAIT_COM);
+					c = COM.read();
+					if(c == _FEND)
 						break;
-					case _FESC:
-						if(state == _DATA)
-						{
-							state = _ESCAPE;
-						}
-						break;
-					case _TFEND:
-					case _TFESC:
-						if(state == _ESCAPE)
-							state = _DATA;
-						break;
-					default:
-						state = _END;
-						break;
+					else
+						XCVR.write(c);
 				}
+				XCVR.write(_AX25_FLAG);
+				wait(WAIT_AUX);
+
+				tx_state = _END;
 			}
 			else
 			{
-				if(c == OP(0x0, _FRAME))	/* First port, data frame */
 				{
-					XCVR.write("\xC0\x00", 2); /* specifiy that it's 2 bytes, otherwise it will be ignored (NUL) */
-					do
-					{
-						wait(WAIT_COM);
-						XCVR.write(c = Serial.read());
-					}
-					while(c != _FEND);
-					wait(WAIT_AUX);
-
-					state = _END;
+					while(COM.available() <= 0) spin();
+					c = COM.read();
 				}
-				else
-				{
-					while(c != _FEND)	/* Skip this frame */
-					{
-						wait(WAIT_COM);
-						c = Serial.read();
-					}
-					state = _END;
-				}
+				while(c != _FEND)	/* Skip this frame, also skips FENDs (one at a time) */
+				tx_state = _END;
 			}
 		}
-		
-		/* RF -> Modem -> Computer */
-		if(XCVR.available() > 0)
-			Serial.write(XCVR.read());
 	}
+
+	/* RF -> Modem -> Computer */
+	if(XCVR.available() > 0)
+	{
+		c = XCVR.read();
+		switch(c)
+		{
+			case _FEND:
+			case _FESC:
+				COM.write(_FESC);
+				if(c == _FEND)
+					COM.write(_TFEND);
+				else if(c == _FESC)
+					COM.write(_TFESC);
+				break;
+			case _AX25_FLAG:
+				if(rx_state == _END)
+				{
+					rx_state = _DATA;
+					COM.write("\xC0\x00", 2);
+				}
+				else if(rx_state == _DATA)
+				{
+					rx_state = _END;
+					COM.write('\xC0');
+				}
+				break;
+			default:
+				if(rx_state != _END) /* Do not pass stray data outside of frame */
+					COM.write(c);
+				break;
+		}
+	}
+}
 }
