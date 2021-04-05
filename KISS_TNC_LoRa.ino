@@ -22,70 +22,80 @@
 \* ========================================================================== */
 
 #include <stdint.h>
-#include <stdio.h>
-#include <SoftwareSerial.h>
-
-/* Pin Configuration */
-#define AUX	2
-#define XCVR_RX	11
-#define XCVR_TX	12
-
-/* State machine */
-enum kiss_state
-{
-	_START,
-	_DATA,
-	_ESCAPE,
-	_END
-};
+#include <SPI.h>
+#include <RadioLib.h>
+#include "minilzo.h"
 
 /* Special characters */
-#define _FEND	((byte)0xC0)
-#define _FESC	((byte)0xDB)
-#define _TFEND	((byte)0xDC)
-#define _TFESC	((byte)0xDD)
-#define _AX25_FLAG	((byte)0x7E)
+#define FEND	((byte)0xC0)
+#define FESC	((byte)0xDB)
+#define TFEND	((byte)0xDC)
+#define TFESC	((byte)0xDD)
+#define AX25_FLAG	((byte)0x7E)
+#define _MAX_PACKET_SIZE	332
 
 /* KISS frame type */
 enum kiss_frame_type
 {
 	_FRAME = 0,
 	_TXDELAY,
-	_P,
+	_PERSISTANCE,
 	_SLOTTIME,
 	_FDUPLEX,
 	_SETHARDWARE,
 	_RETURN = 0xFF
 };
 
-#define OP(dev, type) \
-	((dev << 4 & 0xF0) | type)
+SPIClass * hspi = new SPIClass(HSPI);
+// NSS, DIO1, NRST, BUSY, SPI
+SX1268 radio = new Module(15, 33, 23, 39, *hspi);
 
-/* SoftwareSerial for connecting UART LoRa transceiver */
-SoftwareSerial XCVR(XCVR_RX, XCVR_TX);
-#define COM Serial
+volatile int rx_flag = false;
+
+void set_rx_flag(void)
+{
+	rx_flag = true;
+	return;
+}
+
+#define HEAP_ALLOC(var,size) \
+    lzo_align_t __LZO_MMODEL var [ ((size) + (sizeof(lzo_align_t) - 1)) / sizeof(lzo_align_t) ]
+
+static HEAP_ALLOC(wrkmem, LZO1X_1_MEM_COMPRESS);
 
 void setup(void)
 {
-	COM.begin(9600);
-	XCVR.begin(9600);
+	Serial.begin(9600);
 
-	pinMode(AUX, INPUT_PULLUP);
 	pinMode(LED_BUILTIN, OUTPUT);
+
+	hspi->begin();
+	radio.begin(438.2);
+	radio.setRfSwitchPins(17, 4);
+	radio.setOutputPower(22);
+	radio.setBandwidth(15.6);
+	radio.setCodingRate(8);
+	radio.setSpreadingFactor(8);
+	radio.setPreambleLength(32);
+	radio.autoLDRO();
+	radio.setCRC(2); // 2 byte CRC16
+
+	lzo_init();
+
+	radio.setDio1Action(set_rx_flag);
+	radio.startReceive();
 }
 
 /* Idle spinning */
 
 void spin(void)
 {
-	digitalWrite(LED_BUILTIN, digitalRead(AUX));
 }
 
 enum wait_type
 {
 	WAIT_COM,
 	WAIT_XCVR,
-	WAIT_AUX
 };
 
 /* Waiting for data or operation completion */
@@ -93,16 +103,10 @@ void wait(int type)
 {
 	switch(type)
 	{
-		case WAIT_AUX:
-			while(digitalRead(AUX) == LOW)
-				spin();
-			break;
 		case WAIT_XCVR:
-			while(XCVR.available() <= 0)
-				spin();
 			break;
 		case WAIT_COM:
-			while(COM.available() <= 0)
+			while(Serial.available() <= 0)
 				spin();
 			break;
 		default:
@@ -110,115 +114,107 @@ void wait(int type)
 	}
 }
 
-void loop()
+/* State machine */
+enum kiss_state
 {
-	uint8_t c;
-	uint8_t tx_state = _END;
-	uint8_t rx_state = _END;
-	char debug_buf[256];
+	// Return Value
+	IDLE,
+	READY,
 
-while(1)
+	// Internal
+	_END,
+	_DATA,
+	_DISCARD
+};
+
+/* Receive KISS frame from computer, note that we don't unescape bytes */
+int rx_kiss(int *rx_bytes, byte *d, byte c)
 {
-	while((Serial.available() <= 0 && XCVR.available() <= 0))
-		spin();
+	static int state = _END;
+	static byte b[2]; /* A two byte buffer so we can look back */
 
-	/* Computer -> Modem -> RF */
-	if(COM.available() > 0)
+	b[0] = b[1];
+	b[1] = c;
+
+	if(b[0] == FEND && b[1] == FEND) // Two FEND is between frames
 	{
-		c = COM.read();
-
-		if(tx_state != _START)
+		*rx_bytes = 0;
+		state = _END;
+	}
+	if(b[0] == FEND && b[1] != FEND)
+	{
+		if(b[1] == 0)
 		{
-			switch(c)
-			{
-				case _FEND:
-					if(tx_state == _END)
-					{
-						tx_state = _START;
-					}
-					else
-					{
-						tx_state = _END;
-					}
-					break;
-				case _FESC:
-					if(tx_state == _DATA)
-					{
-						tx_state = _ESCAPE;
-					}
-					break;
-				case _TFEND:
-				case _TFESC:
-					if(tx_state == _ESCAPE)
-						tx_state = _DATA;
-					break;
-				default:
-					tx_state = _END;
-					break;
-			}
+			state = _DATA;
+			*rx_bytes = 0;
 		}
 		else
-		{
-			if(c == OP(0x0, _FRAME))	/* First port, data frame */
-			{
-				XCVR.write(_AX25_FLAG);
-				while(c != _FEND)
-				{
-					wait(WAIT_COM);
-					c = COM.read();
-					if(c == _FEND)
-						break;
-					else
-						XCVR.write(c);
-				}
-				XCVR.write(_AX25_FLAG);
-				wait(WAIT_AUX);
-
-				tx_state = _END;
-			}
-			else
-			{
-				{
-					while(COM.available() <= 0) spin();
-					c = COM.read();
-				}
-				while(c != _FEND)	/* Skip this frame, also skips FENDs (one at a time) */
-				tx_state = _END;
-			}
-		}
+			state = _DISCARD;
 	}
-
-	/* RF -> Modem -> Computer */
-	if(XCVR.available() > 0)
+	if(state == _DATA)
 	{
-		c = XCVR.read();
-		switch(c)
+		if(b[1] != FEND)
+			d[(*rx_bytes)++] = b[1];
+		else
 		{
-			case _FEND:
-			case _FESC:
-				COM.write(_FESC);
-				if(c == _FEND)
-					COM.write(_TFEND);
-				else if(c == _FESC)
-					COM.write(_TFESC);
-				break;
-			case _AX25_FLAG:
-				if(rx_state == _END)
-				{
-					rx_state = _DATA;
-					COM.write("\xC0\x00", 2);
-				}
-				else if(rx_state == _DATA)
-				{
-					rx_state = _END;
-					COM.write('\xC0');
-				}
-				break;
-			default:
-				if(rx_state != _END) /* Do not pass stray data outside of frame */
-					COM.write(c);
-				break;
+			state = _END;
+			return READY;
 		}
 	}
+	if(state == _DISCARD)
+	{
+		if(b[1] == FEND)
+			state = _END;
+	}
+	return IDLE;
 }
+
+#define _MAX_LORA_SIZE 253
+
+void loop()
+{
+	byte tx_buf[1024];
+	byte tx_comp_buf[_MAX_LORA_SIZE];
+	int tx_len = 0;
+
+	byte rx_buf[_MAX_LORA_SIZE];
+	unsigned char rx_decomp_buf[_MAX_PACKET_SIZE];
+	int lzo_errno;
+	int state;
+	lzo_uint rx_decomp_len=0;
+	lzo_uint rx_len = 0;
+
+	/* Receive KISS frame from computer & transmit */
+	/*
+	if(Serial.available() > 0)
+		state = rx_kiss(&tx_len, tx_buf, Serial.read());
+
+	if(state == READY)
+	{
+		radio.transmit(tx_buf, 255);
+	}
+	Serial.print(F("Datarate:\t"));
+	Serial.print(radio.getDataRate());
+	Serial.println(F(" bps"));
+	*/
+	/* Receive LoRa packet */
+
+	if(rx_flag)
+	{
+		rx_flag = false;
+		rx_len = radio.getPacketLength();
+		radio.readData(rx_buf, rx_len);
+
+		lzo_errno = lzo1x_decompress(rx_buf, rx_len, rx_decomp_buf, &rx_decomp_len, NULL);
+
+		if(lzo_errno == LZO_E_OK)
+		{
+			Serial.write(FEND);
+			Serial.write('\0');
+			Serial.write(rx_decomp_buf, rx_decomp_len);
+			Serial.write(FEND);
+		}
+		radio.startReceive();
+	}
+	delay(1000);
 }
