@@ -216,5 +216,4 @@ void loop()
 		}
 		radio.startReceive();
 	}
-	delay(1000);
 }
