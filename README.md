@@ -1,14 +1,12 @@
-# KISS TNC for UART LoRa module as Packet Radio Modem
-This project is using Arduino as an UART interface between computer and UART LoRa module, which transmits UART character stream directly using LoRa modulation.  
-The main usage is to transmit APRS packet over LoRa.
+# KISS TNC for SPI LoRa module as Packet Radio Modem
+## WIP!!
 
-## Operating Principle
-By violating the specification of the KISS protocol (ignoring all non-data frames), and directly relaying the KISS data frame coming from LoRa module, we avoided implementing all KISS functionalities. Thus, less code, less work.  
-
-I am aware that LoRa is not a reliable media, and lost packet on LoRa might cause APRS packet being truncated, but it seems to work fine. (as long as one APRS packet fits in one LoRa packet)
+# Todo:
+Implement modem TX functionality.
 
 # On Air Format
-Same as AX.25, but 16 bit checksum is omitted.
+Same as AX.25, but both 0x7E and 16 bit checksum is omitted.
 
 ## Credits
-Thanks BX4ACP for giving me advises
+* Thanks BX4ACP for giving me advises
+* miniLZO for outstanding low memory-footprint compression algorithm
