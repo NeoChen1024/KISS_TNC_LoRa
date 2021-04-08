@@ -203,17 +203,20 @@ void loop()
 	{
 		rx_flag = false;
 		rx_len = radio.getPacketLength();
-		radio.readData(rx_buf, rx_len);
+		if(radio.readData(rx_buf, rx_len) != ERR_NONE)
+			goto skip;
 
 		lzo_errno = lzo1x_decompress(rx_buf, rx_len, rx_decomp_buf, &rx_decomp_len, NULL);
 
+		Serial.write(FEND);
 		if(lzo_errno == LZO_E_OK)
 		{
-			Serial.write(FEND);
 			Serial.write('\0');
 			Serial.write(rx_decomp_buf, rx_decomp_len);
-			Serial.write(FEND);
 		}
+		Serial.write(FEND);
+
+		skip:
 		radio.startReceive();
 	}
 }
